@@ -1,0 +1,16 @@
+{
+  "name": "gemini-conversational-ai",
+  "version": "1.0.0",
+  "description": "Gemini Conversational AI via GenAI API",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "start": "cd frontend && npm run dev",
+    "backend": "cd python-backend && uvicorn main:app --reload"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}
