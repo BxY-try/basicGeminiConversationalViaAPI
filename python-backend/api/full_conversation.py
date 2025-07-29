@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Response, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
 import os
@@ -10,6 +11,7 @@ import wave
 import logging
 import json
 from typing import Optional, List, Dict
+from pydantic import BaseModel
 
 from .chat_history import save_message_to_history
 
@@ -22,17 +24,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-@router.post("/api/full-conversation")
+class ConversationResponse(BaseModel):
+    user_transcript: str
+    ai_response: str
+    audio_base64: str
+
+@router.post("/api/full-conversation", response_model=ConversationResponse)
 async def full_conversation(
     audio: UploadFile = File(...),
     history: str = Form('[]'), # Default to an empty JSON array string
     chat_id: Optional[str] = Form(None)
 ):
     """
-    Complete audio-to-audio pipeline with conversation history:
-    1. Convert audio to WAV format
-    2. Use Gemini 2.5 Flash for audio processing (STT and as the "brain") with history
-    3. Use gemini-2.5-flash-preview-tts to convert response text to audio
+    Refactored audio-to-audio pipeline with proper history management:
+    1. Transcribe audio to text (STT).
+    2. Save user's transcribed text to history.
+    3. Generate AI text response based on the full, updated history.
+    4. Save AI's response to history.
+    5. Convert AI's text response to audio (TTS).
+    6. Return user transcript, AI response, and AI audio.
     """
     temp_input_path = None
     temp_wav_path = None
@@ -50,19 +60,35 @@ async def full_conversation(
         # Initialize Google Generative AI client
         client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
         
-        # TAHAP 2: AUDIO -> TEXT RESPONSE (GEMINI 2.5 FLASH)
-        # Upload the audio file to Gemini API
+        # === TAHAP 1: Transkripsi Audio (STT) ===
         audio_file = client.files.upload(path=temp_wav_path)
+        stt_prompt = "Transcribe this audio."
+        stt_result = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[stt_prompt, types.Part(file_data=types.FileData(mime_type=audio_file.mime_type, file_uri=audio_file.uri))]
+        )
+        user_transcript = stt_result.text.strip()
+        logger.info(f"User transcript: '{user_transcript}'")
 
-        # Build the conversation history from the JSON string
+        if not user_transcript:
+            raise HTTPException(status_code=400, detail="Audio could not be transcribed or is empty.")
+
+        # === TAHAP 2: Simpan Transkripsi Pengguna ke Riwayat ===
+        if chat_id:
+            save_message_to_history(chat_id, {"role": "user", "content": user_transcript})
+
+        # === TAHAP 3: Hasilkan Respons AI berdasarkan Riwayat Lengkap ===
+        # Muat riwayat yang sudah diperbarui
         try:
-            parsed_history: List[Dict[str, str]] = json.loads(history)
+            # Re-parse history after saving the user's transcript
+            current_history: List[Dict[str, str]] = json.loads(history)
+            current_history.append({"role": "user", "content": user_transcript})
         except json.JSONDecodeError:
-            logger.error("Failed to parse conversation history JSON")
-            parsed_history = []
+            logger.error("Failed to parse conversation history JSON for AI response")
+            current_history = [{"role": "user", "content": user_transcript}]
 
         conversation_contents = []
-        for message in parsed_history:
+        for message in current_history:
             role = message.get("role")
             content = message.get("content")
             if role and content:
@@ -70,93 +96,55 @@ async def full_conversation(
                 conversation_contents.append(
                     types.Content(role=gemini_role, parts=[types.Part.from_text(content)])
                 )
-
-        # Add the current audio prompt
-        audio_processing_prompt = "Anda adalah asisten AI yang ramah. Tanggapi pertanyaan atau pernyataan dalam audio ini secara langsung dalam bahasa Indonesia."
-        conversation_contents.append(
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part.from_text(audio_processing_prompt),
-                    types.Part(
-                        file_data=types.FileData(
-                            mime_type=audio_file.mime_type,
-                            file_uri=audio_file.uri
-                        )
-                    )
-                ]
-            )
-        )
-
-        # Generate content with history
-        result = client.models.generate_content(
+        
+        ai_response_result = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=conversation_contents
         )
-        transcribed_response = result.text
-        
-        # Log the actual transcribed text for debugging
-        logger.debug(f"STT Result: '{transcribed_response}'")
+        ai_response_text = ai_response_result.text
+        logger.info(f"AI response: '{ai_response_text}'")
 
-        # Save messages to history if chat_id is provided
+        # === TAHAP 4: Simpan Respons AI ke Riwayat ===
         if chat_id:
-            # We don't have the user's transcribed text here, so we save a placeholder.
-            # A more advanced implementation might run STT first, then save.
-            save_message_to_history(chat_id, {"role": "user", "content": "[Audio Input]"})
-            save_message_to_history(chat_id, {"role": "ai", "content": transcribed_response})
-        
-        if not transcribed_response:
-            logger.error("Empty response from STT model")
-            raise Exception("Model tidak menghasilkan konten atau respons tidak valid.")
-        
-        # TAHAP 3: TEXT -> AUDIO (Using Google's TTS capabilities)
-        # Configure TTS with proper audio format
-        generate_content_config = types.GenerateContentConfig(
+            save_message_to_history(chat_id, {"role": "ai", "content": ai_response_text})
+
+        # === TAHAP 5: Konversi Respons AI ke Audio (TTS) ===
+        tts_config = types.GenerateContentConfig(
             response_modalities=["audio"],
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Zephyr"
-                    )
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
                 )
             )
         )
         
-        # Generate TTS response - CORRECTED FORMAT (direct string content)
-        logger.debug(f"Generating TTS for text: '{transcribed_response}'")
-        tts_response = client.models.generate_content(
+        tts_result = client.models.generate_content(
             model="gemini-2.5-flash-preview-tts",
-            contents=transcribed_response,  # DIRECT STRING CONTENT (FIXED)
-            config=generate_content_config
+            contents=ai_response_text,
+            config=tts_config
         )
         
-        # Extract audio data from response
-        if (tts_response.candidates and 
-            tts_response.candidates[0].content.parts and 
-            tts_response.candidates[0].content.parts[0].inline_data):
-            
-            pcm_data = tts_response.candidates[0].content.parts[0].inline_data.data
-            sample_rate = 24000  # Standard TTS sample rate
-            
-            # Create WAV container in memory
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, 'wb') as wf:
-                wf.setnchannels(1)      # Mono
-                wf.setsampwidth(2)      # 16-bit
-                wf.setframerate(sample_rate)
-                wf.writeframes(pcm_data)
-            
-            # Log successful audio generation
-            logger.info(f"Successfully generated {len(pcm_data)} byte audio response")
-            
-            # Return the complete WAV file
-            return Response(
-                content=wav_buffer.getvalue(),
-                media_type="audio/wav"
-            )
+        if not (tts_result.candidates and tts_result.candidates[0].content.parts and tts_result.candidates[0].content.parts[0].inline_data):
+            raise Exception("TTS generation failed or returned no audio data.")
+
+        pcm_data = tts_result.candidates[0].content.parts[0].inline_data.data
+        sample_rate = 24000
+
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm_data)
         
-        logger.error("TTS generation failed - no audio data in response")
-        raise Exception("TTS generation failed or returned no audio data.")
+        audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
+
+        # === TAHAP 6: Kembalikan Respons Terstruktur ===
+        return JSONResponse(content={
+            "user_transcript": user_transcript,
+            "ai_response": ai_response_text,
+            "audio_base64": audio_base64
+        })
         
     except Exception as e:
         # Enhanced error logging with full traceback

@@ -115,10 +115,21 @@ export default function Home() {
           });
 
           if (response.ok) {
-            const audioData = await response.arrayBuffer();
-            const audioBlob = new Blob([audioData], { type: 'audio/wav' });
-            const url = URL.createObjectURL(audioBlob);
-            setAudioUrl(url);
+            const data = await response.json();
+            
+            // Create audio URL from base64
+            const audioBlob = new Blob([base64ToArrayBuffer(data.audio_base64)], { type: 'audio/wav' });
+            const audioUrl = URL.createObjectURL(audioBlob);
+
+            // Update chat history with both user's transcript and AI's response
+            setChatHistory(prev => [
+              ...prev,
+              { role: 'user', content: data.user_transcript },
+              { role: 'ai', content: data.ai_response, audioUrl: audioUrl }
+            ]);
+
+            // Set the main audio URL for the player if needed, or remove if redundant
+            setAudioUrl(audioUrl);
           } else {
             throw new Error('Backend processing failed');
           }
