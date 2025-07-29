@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Response
+from fastapi import APIRouter, HTTPException, UploadFile, File, Response, Form
 from google import genai
 from google.genai import types
 import os
@@ -8,6 +8,10 @@ from utils.audio_utils import convert_to_wav
 import io
 import wave
 import logging
+import json
+from typing import Optional, List, Dict
+
+from .chat_history import save_message_to_history
 
 # Configure detailed logging
 logging.basicConfig(
@@ -19,11 +23,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.post("/api/full-conversation")
-async def full_conversation(audio: UploadFile = File(...)):
+async def full_conversation(
+    audio: UploadFile = File(...),
+    history: str = Form('[]'), # Default to an empty JSON array string
+    chat_id: Optional[str] = Form(None)
+):
     """
-    Complete audio-to-audio pipeline:
+    Complete audio-to-audio pipeline with conversation history:
     1. Convert audio to WAV format
-    2. Use Gemini 2.5 Flash for audio processing (STT and as the "brain")
+    2. Use Gemini 2.5 Flash for audio processing (STT and as the "brain") with history
     3. Use gemini-2.5-flash-preview-tts to convert response text to audio
     """
     temp_input_path = None
@@ -46,30 +54,56 @@ async def full_conversation(audio: UploadFile = File(...)):
         # Upload the audio file to Gemini API
         audio_file = client.files.upload(path=temp_wav_path)
 
-        audio_processing_prompt = "Anda adalah asisten AI yang ramah. Tanggapi pertanyaan atau pernyataan dalam audio ini secara langsung dalam bahasa Indonesia."
+        # Build the conversation history from the JSON string
+        try:
+            parsed_history: List[Dict[str, str]] = json.loads(history)
+        except json.JSONDecodeError:
+            logger.error("Failed to parse conversation history JSON")
+            parsed_history = []
 
-        # FINAL CORRECTION: Explicitly create a Part from the audio file's URI and MIME type
+        conversation_contents = []
+        for message in parsed_history:
+            role = message.get("role")
+            content = message.get("content")
+            if role and content:
+                gemini_role = "model" if role == "ai" else "user"
+                conversation_contents.append(
+                    types.Content(role=gemini_role, parts=[types.Part.from_text(content)])
+                )
+
+        # Add the current audio prompt
+        audio_processing_prompt = "Anda adalah asisten AI yang ramah. Tanggapi pertanyaan atau pernyataan dalam audio ini secara langsung dalam bahasa Indonesia."
+        conversation_contents.append(
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(audio_processing_prompt),
+                    types.Part(
+                        file_data=types.FileData(
+                            mime_type=audio_file.mime_type,
+                            file_uri=audio_file.uri
+                        )
+                    )
+                ]
+            )
+        )
+
+        # Generate content with history
         result = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[
-                types.Content(
-                    parts=[
-                        types.Part.from_text(audio_processing_prompt),
-                        types.Part(
-                            file_data=types.FileData(
-                                # Get the mime_type and uri from the uploaded file object
-                                mime_type=audio_file.mime_type,
-                                file_uri=audio_file.uri
-                            )
-                        )
-                    ]
-                )
-            ]
-        )        
+            contents=conversation_contents
+        )
         transcribed_response = result.text
         
         # Log the actual transcribed text for debugging
         logger.debug(f"STT Result: '{transcribed_response}'")
+
+        # Save messages to history if chat_id is provided
+        if chat_id:
+            # We don't have the user's transcribed text here, so we save a placeholder.
+            # A more advanced implementation might run STT first, then save.
+            save_message_to_history(chat_id, {"role": "user", "content": "[Audio Input]"})
+            save_message_to_history(chat_id, {"role": "ai", "content": transcribed_response})
         
         if not transcribed_response:
             logger.error("Empty response from STT model")

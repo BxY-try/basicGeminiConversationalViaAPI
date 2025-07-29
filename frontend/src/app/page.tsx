@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 
 // Utility to convert base64 to ArrayBuffer
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
@@ -25,9 +25,64 @@ export default function Home() {
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [chatHistory, setChatHistory] = useState<Array<{role: string, content: string, audioUrl?: string, imageUrl?: string}>>([]);
+  const [chatSessions, setChatSessions] = useState<string[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const mimeTypeRef = useRef<string>('');
+
+  const handleNewChat = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/chats', { method: 'POST' });
+      const data = await response.json();
+      setActiveChatId(data.chat_id);
+      setChatHistory([]);
+      setAudioUrl(null);
+      setInputText('');
+      setImage(null);
+      setImagePreview(null);
+      fetchChatSessions(); // Refresh the list
+    } catch (error) {
+      console.error("Failed to create new chat:", error);
+    }
+  };
+
+  const fetchChatSessions = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/chats');
+      const data = await response.json();
+      setChatSessions(data);
+    } catch (error) {
+      console.error("Failed to fetch chat sessions:", error);
+    }
+  };
+
+  const loadChatSession = async (chatId: string) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/chats/${chatId}`);
+      const data = await response.json();
+      setActiveChatId(data.id);
+      setChatHistory(data.history);
+    } catch (error) {
+      console.error("Failed to load chat session:", error);
+    }
+  };
+
+  const deleteChatSession = async (chatId: string) => {
+    try {
+      await fetch(`http://localhost:8000/api/chats/${chatId}`, { method: 'DELETE' });
+      fetchChatSessions(); // Refresh the list
+      if (activeChatId === chatId) {
+        handleNewChat(); // Start a new chat if the active one was deleted
+      }
+    } catch (error) {
+      console.error("Failed to delete chat session:", error);
+    }
+  };
+
+  useEffect(() => {
+    fetchChatSessions();
+  }, []);
 
   const startRecording = async () => {
     try {
@@ -47,6 +102,11 @@ export default function Home() {
         const audioBlob = new Blob(chunksRef.current, { type: 'audio/wav' });
         const formData = new FormData();
         formData.append('audio', audioBlob, `recording.wav`);
+        // Add chat history to the form data
+        formData.append('history', JSON.stringify(chatHistory));
+        if (activeChatId) {
+          formData.append('chat_id', activeChatId);
+        }
 
         try {
           const response = await fetch('http://localhost:8000/api/full-conversation', {
@@ -116,6 +176,11 @@ export default function Home() {
       const formData = new FormData();
       formData.append('image', image);
       formData.append('prompt', inputText);
+      // Add chat history to the form data
+      formData.append('history', JSON.stringify(chatHistory));
+      if (activeChatId) {
+        formData.append('chat_id', activeChatId);
+      }
       
       // Clear input
       setInputText('');
@@ -170,7 +235,7 @@ export default function Home() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ text: inputText }),
+        body: JSON.stringify({ text: inputText, history: chatHistory, chat_id: activeChatId }),
       });
 
       if (response.ok) {
@@ -196,12 +261,43 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
-      <div className="w-full max-w-md bg-white rounded-xl shadow-md p-6">
-        <h1 className="text-2xl font-bold text-center mb-6 text-gray-800">
-          Gemini Conversational AI
-        </h1>
-        
+    <div className="min-h-screen flex bg-gray-50">
+      {/* Sidebar */}
+      <div className="w-64 bg-white border-r border-gray-200 p-4 flex flex-col">
+        <h2 className="text-lg font-semibold mb-4">Chat History</h2>
+        <button
+          onClick={handleNewChat}
+          className="w-full px-4 py-2 mb-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+        >
+          + New Chat
+        </button>
+        <div className="flex-grow overflow-y-auto">
+          {chatSessions.map((sessionId) => (
+            <div key={sessionId} className="flex justify-between items-center p-2 rounded-lg hover:bg-gray-100">
+              <button
+                onClick={() => loadChatSession(sessionId)}
+                className="flex-grow text-left"
+              >
+                {sessionId.substring(0, 8)}...
+              </button>
+              <button
+                onClick={() => deleteChatSession(sessionId)}
+                className="ml-2 text-red-500 hover:text-red-700"
+              >
+                &#x1F5D1; {/* Trash can icon */}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Main Chat Window */}
+      <div className="flex-grow flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-xl shadow-md p-6">
+          <h1 className="text-2xl font-bold text-center mb-6 text-gray-800">
+            Gemini Conversational AI
+          </h1>
+
         <div className="mb-6 text-center">
           <p className="text-gray-600">
             {isRecording 
@@ -379,6 +475,7 @@ export default function Home() {
         <div className="mt-6 text-center text-sm text-gray-500">
           <p>Backend: Python FastAPI • Port 8000</p>
           <p>Frontend: Next.js • Port 3000</p>
+        </div>
         </div>
       </div>
     </div>

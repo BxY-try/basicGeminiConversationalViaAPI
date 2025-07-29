@@ -6,16 +6,22 @@ import tempfile
 import base64
 import io
 import wave
+import json
+from typing import List, Dict, Optional
+from .chat_history import save_message_to_history
 
 router = APIRouter()
 
 @router.post("/api/processAudio")
 async def process_image_and_text(
     prompt: str = Form(...),
-    image: UploadFile = File(...)
+    image: UploadFile = File(...),
+    history: str = Form('[]'),
+    chat_id: Optional[str] = Form(None)
 ):
     """
-    Process an image with a text prompt using the Gemini model and return text with audio response.
+    Process an image with a text prompt and conversation history using the Gemini model
+    and return text with audio response.
     """
     try:
         # Initialize Google Generative AI client
@@ -24,29 +30,51 @@ async def process_image_and_text(
         # Read image bytes directly
         image_bytes = await image.read()
         
-        # Create multimodal prompt with both text and image
-        model_input = types.Content(
-            parts=[
-                # Text part
-                types.Part.from_text(prompt),
-                # Image part (inline data)
-                types.Part(
-                    inline_data=types.Blob(
-                        mime_type=image.content_type,  # e.g., 'image/jpeg'
-                        data=image_bytes
-                    )
+        # Build conversation history
+        try:
+            parsed_history: List[Dict[str, str]] = json.loads(history)
+        except json.JSONDecodeError:
+            parsed_history = []
+
+        conversation_contents = []
+        for message in parsed_history:
+            role = message.get("role")
+            content = message.get("content")
+            if role and content:
+                gemini_role = "model" if role == "ai" else "user"
+                conversation_contents.append(
+                    types.Content(role=gemini_role, parts=[types.Part.from_text(content)])
                 )
-            ]
+
+        # Add the new user message with image
+        conversation_contents.append(
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(prompt),
+                    types.Part(
+                        inline_data=types.Blob(
+                            mime_type=image.content_type,
+                            data=image_bytes
+                        )
+                    )
+                ]
+            )
         )
         
         # Generate content using the correct API method
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[model_input]
+            contents=conversation_contents
         )
         
         # Get the generated text
         text_response = response.text
+
+        # Save messages to history if chat_id is provided
+        if chat_id:
+            save_message_to_history(chat_id, {"role": "user", "content": prompt})
+            save_message_to_history(chat_id, {"role": "ai", "content": text_response})
         
         # Generate TTS audio
         tts_config = types.GenerateContentConfig(
