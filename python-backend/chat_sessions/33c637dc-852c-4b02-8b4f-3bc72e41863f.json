@@ -1,0 +1,20 @@
+{
+  "history": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "Halo, aku siapa?"
+        }
+      ]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "text": "Maaf, aku tidak tahu Anda siapa. Aku adalah model bahasa yang besar, dilatih oleh Google."
+        }
+      ]
+    }
+  ]
+}

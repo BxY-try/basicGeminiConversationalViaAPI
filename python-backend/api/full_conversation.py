@@ -13,7 +13,9 @@ import json
 from typing import Optional, List, Dict
 from pydantic import BaseModel
 
-from .chat_history import save_message_to_history
+from .chat_history import save_history # Use the new save_history function
+from utils.model_utils import process_content_with_tools, client as genai_client
+from google.genai import types as genai_types # Import types for history reconstruction
 
 # Configure detailed logging
 logging.basicConfig(
@@ -36,36 +38,29 @@ async def full_conversation(
     chat_id: Optional[str] = Form(None)
 ):
     """
-    Refactored audio-to-audio pipeline with proper history management:
-    1. Transcribe audio to text (STT).
-    2. Save user's transcribed text to history.
-    3. Generate AI text response based on the full, updated history.
-    4. Save AI's response to history.
-    5. Convert AI's text response to audio (TTS).
-    6. Return user transcript, AI response, and AI audio.
+    Refactored audio-to-audio pipeline with proper history management and tool-calling.
     """
     temp_input_path = None
     temp_wav_path = None
+    audio_file_obj = None
     
     try:
-        # Save the uploaded audio to a temporary file
+        # Save and convert audio
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio.filename)[1]) as tmp_file:
             tmp_file.write(await audio.read())
             temp_input_path = tmp_file.name
         
-        # Convert audio to WAV format
         temp_wav_path = temp_input_path + ".wav"
         convert_to_wav(temp_input_path, temp_wav_path)
         
-        # Initialize Google Generative AI client
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-        
-        # === TAHAP 1: Transkripsi Audio (STT) ===
-        audio_file = client.files.upload(path=temp_wav_path)
-        stt_prompt = "Transcribe this audio."
-        stt_result = client.models.generate_content(
+        # 1. Transcribe Audio to Text (STT)
+        audio_file_obj = genai_client.files.upload(path=temp_wav_path)
+        stt_result = genai_client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[stt_prompt, types.Part(file_data=types.FileData(mime_type=audio_file.mime_type, file_uri=audio_file.uri))]
+            contents=[
+                "Transcribe this audio.",
+                types.Part(file_data=types.FileData(mime_type=audio_file_obj.mime_type, file_uri=audio_file_obj.uri))
+            ]
         )
         user_transcript = stt_result.text.strip()
         logger.info(f"User transcript: '{user_transcript}'")
@@ -73,73 +68,74 @@ async def full_conversation(
         if not user_transcript:
             raise HTTPException(status_code=400, detail="Audio could not be transcribed or is empty.")
 
-        # === TAHAP 2: Simpan Transkripsi Pengguna ke Riwayat ===
-        if chat_id:
-            save_message_to_history(chat_id, {"role": "user", "content": user_transcript})
+        # 2. Build conversation history
+        conversation_history = []
 
-        # === TAHAP 3: Hasilkan Respons AI berdasarkan Riwayat Lengkap ===
-        # Muat riwayat yang sudah diperbarui
-        try:
-            # Re-parse history after saving the user's transcript
-            current_history: List[Dict[str, str]] = json.loads(history)
-            current_history.append({"role": "user", "content": user_transcript})
-        except json.JSONDecodeError:
-            logger.error("Failed to parse conversation history JSON for AI response")
-            current_history = [{"role": "user", "content": user_transcript}]
-
-        conversation_contents = []
-        for message in current_history:
+        # Reconstruct history from the rich JSON format
+        for message in json.loads(history):
             role = message.get("role")
-            content = message.get("content")
-            if role and content:
-                gemini_role = "model" if role == "ai" else "user"
-                conversation_contents.append(
-                    types.Content(role=gemini_role, parts=[types.Part.from_text(content)])
-                )
-        
-        ai_response_result = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=conversation_contents
+            parts = []
+            for part_data in message.get("parts", []):
+                if 'text' in part_data:
+                    parts.append(genai_types.Part.from_text(part_data['text']))
+                elif 'function_call' in part_data:
+                    fc = part_data['function_call']
+                    parts.append(genai_types.Part.from_function_call(name=fc['name'], args=fc['args']))
+                elif 'function_response' in part_data:
+                    fr = part_data['function_response']
+                    parts.append(genai_types.Part.from_function_response(name=fr['name'], response=fr['response']))
+            if parts:
+                conversation_history.append(genai_types.Content(role=role, parts=parts))
+
+        # Add the new user transcript to the history
+        conversation_history.append(
+            genai_types.Content(role="user", parts=[genai_types.Part.from_text(user_transcript)])
         )
-        ai_response_text = ai_response_result.text
+
+        # 3. Generate AI response and get the updated history
+        # Log the exact history being sent to the model for debugging
+        logger.debug(f"Full conversation history sent to model: {conversation_history}")
+        ai_response_text, updated_history = process_content_with_tools(conversation_history)
         logger.info(f"AI response: '{ai_response_text}'")
 
-        # === TAHAP 4: Simpan Respons AI ke Riwayat ===
+        # 4. Save the complete, updated history to the file
         if chat_id:
-            save_message_to_history(chat_id, {"role": "ai", "content": ai_response_text})
+            save_history(chat_id, updated_history)
 
-        # === TAHAP 5: Konversi Respons AI ke Audio (TTS) ===
-        tts_config = types.GenerateContentConfig(
-            response_modalities=["audio"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+        # 5. Generate TTS for the final AI response (non-critical)
+        audio_base64 = "" # Default to empty string
+        try:
+            if ai_response_text: # Only generate TTS if there is text
+                tts_config = types.GenerateContentConfig(
+                    response_modalities=["audio"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+                        )
+                    )
                 )
-            )
-        )
-        
-        tts_result = client.models.generate_content(
-            model="gemini-2.5-flash-preview-tts",
-            contents=ai_response_text,
-            config=tts_config
-        )
-        
-        if not (tts_result.candidates and tts_result.candidates[0].content.parts and tts_result.candidates[0].content.parts[0].inline_data):
-            raise Exception("TTS generation failed or returned no audio data.")
+                
+                tts_result = genai_client.models.generate_content(
+                    model="gemini-2.5-flash-preview-tts",
+                    contents=ai_response_text,
+                    config=tts_config
+                )
+                
+                if tts_result.candidates and tts_result.candidates[0].content.parts and tts_result.candidates[0].content.parts[0].inline_data:
+                    pcm_data = tts_result.candidates[0].content.parts[0].inline_data.data
+                    wav_buffer = io.BytesIO()
+                    with wave.open(wav_buffer, 'wb') as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(24000)
+                        wf.writeframes(pcm_data)
+                    audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
+                else:
+                    logger.warning("TTS generation succeeded but returned no audio data.")
+        except Exception as tts_error:
+            logger.error(f"TTS generation failed, but proceeding without audio. Error: {tts_error}")
 
-        pcm_data = tts_result.candidates[0].content.parts[0].inline_data.data
-        sample_rate = 24000
-
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sample_rate)
-            wf.writeframes(pcm_data)
-        
-        audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
-
-        # === TAHAP 6: Kembalikan Respons Terstruktur ===
+        # 6. Return the structured response
         return JSONResponse(content={
             "user_transcript": user_transcript,
             "ai_response": ai_response_text,
@@ -147,23 +143,15 @@ async def full_conversation(
         })
         
     except Exception as e:
-        # Enhanced error logging with full traceback
         import traceback
         logger.error(f"Pipeline error details:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error in pipeline: {str(e)}")
     
     finally:
-        # TAHAP PEMBERSIHAN
-        # Hapus file yang diupload dari server
-        if 'audio_file' in locals():
-            logger.info(f"Deleting uploaded file: {audio_file.name}")
-            client.files.delete(name=audio_file.name)
-        # Hapus file temp dari server
-        if temp_input_path and os.path.exists(temp_input_path):
-            os.unlink(temp_input_path)
-        if temp_wav_path and os.path.exists(temp_wav_path):
-            os.unlink(temp_wav_path)
-        # Hapus file temp dari server
+        # Cleanup
+        if audio_file_obj:
+            logger.info(f"Deleting uploaded file: {audio_file_obj.name}")
+            genai_client.files.delete(name=audio_file_obj.name)
         if temp_input_path and os.path.exists(temp_input_path):
             os.unlink(temp_input_path)
         if temp_wav_path and os.path.exists(temp_wav_path):

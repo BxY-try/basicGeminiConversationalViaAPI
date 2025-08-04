@@ -24,7 +24,7 @@ export default function Home() {
   const [inputText, setInputText] = useState('');
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [chatHistory, setChatHistory] = useState<Array<{role: string, content: string, audioUrl?: string, imageUrl?: string}>>([]);
+  const [chatHistory, setChatHistory] = useState<Array<{role: string, parts: Array<{text?: string; function_call?: any; function_response?: any}>, imageUrl?: string, audioUrl?: string}>>([]);
   const [chatSessions, setChatSessions] = useState<string[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -62,7 +62,14 @@ export default function Home() {
       const response = await fetch(`http://localhost:8000/api/chats/${chatId}`);
       const data = await response.json();
       setActiveChatId(data.id);
-      setChatHistory(data.history);
+      // The history from the backend is now in the rich 'parts' format.
+      // We also need to clear any local audio/image URLs.
+      const formattedHistory = data.history.map((msg: any) => ({
+        ...msg,
+        imageUrl: undefined,
+        audioUrl: undefined,
+      }));
+      setChatHistory(formattedHistory);
     } catch (error) {
       console.error("Failed to load chat session:", error);
     }
@@ -103,6 +110,8 @@ export default function Home() {
         const formData = new FormData();
         formData.append('audio', audioBlob, `recording.wav`);
         // Add chat history to the form data
+        // The backend will transcribe, so we don't know the text yet.
+        // We send the history as is, and the backend adds the new turn.
         formData.append('history', JSON.stringify(chatHistory));
         if (activeChatId) {
           formData.append('chat_id', activeChatId);
@@ -117,19 +126,19 @@ export default function Home() {
           if (response.ok) {
             const data = await response.json();
             
-            // Create audio URL from base64
-            const audioBlob = new Blob([base64ToArrayBuffer(data.audio_base64)], { type: 'audio/wav' });
-            const audioUrl = URL.createObjectURL(audioBlob);
+            // Add user and AI messages to chat history
+            const userMessage = { role: 'user', parts: [{ text: data.user_transcript }] };
+            const aiMessage = { role: 'model', parts: [{ text: data.ai_response }] };
+            setChatHistory(prev => [...prev, userMessage, aiMessage]);
 
-            // Update chat history with both user's transcript and AI's response
-            setChatHistory(prev => [
-              ...prev,
-              { role: 'user', content: data.user_transcript },
-              { role: 'ai', content: data.ai_response, audioUrl: audioUrl }
-            ]);
-
-            // Set the main audio URL for the player if needed, or remove if redundant
-            setAudioUrl(audioUrl);
+            // If we received audio, create a URL and play it.
+            if (data.audio_base64) {
+              const audioBlob = new Blob([base64ToArrayBuffer(data.audio_base64)], { type: 'audio/wav' });
+              const audioUrl = URL.createObjectURL(audioBlob);
+              setAudioUrl(audioUrl);
+            } else {
+              setAudioUrl(null);
+            }
           } else {
             throw new Error('Backend processing failed');
           }
@@ -176,19 +185,22 @@ export default function Home() {
       setIsLoading(true);
       
       // Add user message with image to chat history
-      const userMessage = { 
-        role: 'user', 
-        content: inputText,
+      const userMessage = {
+        role: 'user',
+        parts: [{ text: inputText }],
         imageUrl: imagePreview || URL.createObjectURL(image)
       };
+      // The history sent to the API should not contain local URLs
+      const historyForAPI = chatHistory.map(({imageUrl, audioUrl, ...rest}) => rest);
+
       setChatHistory(prev => [...prev, userMessage]);
-      
+
       // Prepare form data
       const formData = new FormData();
       formData.append('image', image);
       formData.append('prompt', inputText);
       // Add chat history to the form data
-      formData.append('history', JSON.stringify(chatHistory));
+      formData.append('history', JSON.stringify(historyForAPI));
       if (activeChatId) {
         formData.append('chat_id', activeChatId);
       }
@@ -199,7 +211,7 @@ export default function Home() {
       setImage(null);
 
       // Send to backend
-      const response = await fetch('http://localhost:8000/api/processAudio', {
+      const response = await fetch('http://localhost:8000/api/processImage', {
         method: 'POST',
         body: formData,
       });
@@ -207,14 +219,18 @@ export default function Home() {
       if (response.ok) {
         const data = await response.json();
         
-        // Create audio URL from base64
-        const audioBlob = new Blob([base64ToArrayBuffer(data.audio_base64)], { type: 'audio/wav' });
-        const audioUrl = URL.createObjectURL(audioBlob);
+        // Add AI response to chat history
+        const aiMessage = { role: 'model', parts: [{ text: data.text }] };
+        setChatHistory(prev => [...prev, aiMessage]);
         
-        // Add AI response to chat history with audio
-        setChatHistory(prev => [...prev, 
-          { role: 'ai', content: data.text, audioUrl }
-        ]);
+        // If we received audio, create a URL and play it.
+        if (data.audio_base64) {
+          const audioBlob = new Blob([base64ToArrayBuffer(data.audio_base64)], { type: 'audio/wav' });
+          const audioUrl = URL.createObjectURL(audioBlob);
+          setAudioUrl(audioUrl); // Play the response audio
+        } else {
+          setAudioUrl(null);
+        }
       } else {
         throw new Error('Backend processing failed');
       }
@@ -234,32 +250,38 @@ export default function Home() {
       setIsLoading(true);
       
       // Add user message to chat history
-      const userMessage = { role: 'user', content: inputText };
-      setChatHistory(prev => [...prev, userMessage]);
+      const userMessage = { role: 'user', parts: [{ text: inputText }] };
+      // The history sent to the API should not contain local URLs
+      const historyForAPI = chatHistory.map(({imageUrl, audioUrl, ...rest}) => rest);
       
-      // Clear input
+      setChatHistory(prev => [...prev, userMessage]);
       setInputText('');
       
-      // Send to backend
       const response = await fetch('http://localhost:8000/api/generateText', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ text: inputText, history: chatHistory, chat_id: activeChatId }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: inputText,
+          // Send the history *before* adding the new user message, backend will add it
+          history: historyForAPI,
+          chat_id: activeChatId
+        }),
       });
 
       if (response.ok) {
         const data = await response.json();
         
-        // Create audio URL from base64
-        const audioBlob = new Blob([base64ToArrayBuffer(data.audio_base64)], { type: 'audio/wav' });
-        const audioUrl = URL.createObjectURL(audioBlob);
-        
-        // Add AI response to chat history with audio
-        setChatHistory(prev => [...prev, 
-          { role: 'ai', content: data.text, audioUrl }
-        ]);
+        // Add AI response to chat history
+        const aiMessage = { role: 'model', parts: [{ text: data.text }] };
+        setChatHistory(prev => [...prev, aiMessage]);
+
+        // If we received audio, create a URL and play it.
+        if (data.audio_base64) {
+            const audioUrl = URL.createObjectURL(new Blob([base64ToArrayBuffer(data.audio_base64)], { type: 'audio/wav' }));
+            setAudioUrl(audioUrl);
+        } else {
+            setAudioUrl(null);
+        }
       } else {
         throw new Error('Backend processing failed');
       }
@@ -425,17 +447,40 @@ export default function Home() {
           
           {/* Chat History */}
           <div className="mb-4 max-h-60 overflow-y-auto">
-            {chatHistory.map((message, index) => (
-              <div 
-                key={index} 
-                className={`mb-3 p-3 rounded-lg ${
-                  message.role === 'user' 
-                    ? 'bg-blue-100 text-blue-800 ml-4' 
-                    : 'bg-gray-100 text-gray-800 mr-4'
-                }`}
-              >
-                <strong>{message.role === 'user' ? 'You: ' : 'AI: '}</strong>
-                {message.content}
+            {chatHistory.map((message, index) => {
+              // Find the first text part to display.
+              const textPart = message.parts.find(p => p.text)?.text;
+              // Check if the model is making a function call.
+              const hasFunctionCall = message.parts.some(p => p.function_call);
+
+              // If there's no text, but it's a model's turn and it's making a function call,
+              // show a "thinking" message. Otherwise, render nothing for empty messages.
+              if (!textPart) {
+                if (message.role === 'model' && hasFunctionCall) {
+                  return (
+                    <div
+                      key={index}
+                      className="mb-3 p-3 rounded-lg bg-gray-100 text-gray-600 italic mr-4"
+                    >
+                      <strong>AI: </strong>
+                      Thinking... (using a tool)
+                    </div>
+                  );
+                }
+                return null; // Don't render user messages with no text or other empty parts.
+              }
+
+              return (
+                <div
+                  key={index}
+                  className={`mb-3 p-3 rounded-lg ${
+                    message.role === 'user'
+                      ? 'bg-blue-100 text-blue-800 ml-4'
+                      : 'bg-gray-100 text-gray-800 mr-4'
+                  }`}
+                >
+                  <strong>{message.role === 'user' ? 'You: ' : 'AI: '}</strong>
+                  {textPart}
                 
                 {message.imageUrl && (
                   <div className="mt-2">
@@ -455,7 +500,8 @@ export default function Home() {
                   />
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
           
           {/* Text Input Form */}
