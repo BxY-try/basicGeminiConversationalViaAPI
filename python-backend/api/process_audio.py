@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from google import genai
 from google.genai import types
 import os
@@ -11,9 +11,11 @@ import logging
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
 
-from .chat_history import save_history # Use the new save_history function
+from .chat_history import insert_message
 from utils.model_utils import process_content_with_tools, client as genai_client
-from google.genai import types as genai_types # Import types for history reconstruction
+from google.genai import types as genai_types
+from database import get_db_connection
+from supabase import Client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -27,7 +29,8 @@ async def process_image(
     prompt: str = Form(...),
     image: UploadFile = File(...),
     history: str = Form('[]'),
-    chat_id: Optional[str] = Form(None)
+    chat_id: Optional[str] = Form(None),
+    db: Client = Depends(get_db_connection)
 ):
     """
     Process an image with a text prompt and conversation history, with tool-calling.
@@ -40,7 +43,11 @@ async def process_image(
 
         # Reconstruct history from the rich JSON format
         for message in json.loads(history):
+            # CRITICAL FIX: Map 'assistant' role to 'model' for the API
             role = message.get("role")
+            if role == "assistant":
+                role = "model"
+            
             parts = []
             for part_data in message.get("parts", []):
                 if 'text' in part_data:
@@ -70,11 +77,13 @@ async def process_image(
         text_response, updated_history = process_content_with_tools(conversation_history)
         logger.info(f"AI Response for Image: '{text_response}'")
 
-
-        # Save the complete, updated history to the file
+        # Insert user and AI messages to Supabase
         if chat_id:
-            save_history(chat_id, updated_history)
-        
+            # The user message for an image includes the prompt text
+            insert_message(chat_id, "user", prompt, db)
+            if text_response:
+                insert_message(chat_id, "model", text_response, db)
+
         # Generate TTS audio for the final response (non-critical)
         audio_base64 = ""
         try:

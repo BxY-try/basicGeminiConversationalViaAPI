@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
+from supabase import Client
+from database import get_db_connection
 from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
@@ -13,7 +15,7 @@ import json
 from typing import Optional, List, Dict
 from pydantic import BaseModel
 
-from .chat_history import save_history # Use the new save_history function
+from .chat_history import insert_message
 from utils.model_utils import process_content_with_tools, client as genai_client
 from google.genai import types as genai_types # Import types for history reconstruction
 
@@ -35,7 +37,8 @@ class ConversationResponse(BaseModel):
 async def full_conversation(
     audio: UploadFile = File(...),
     history: str = Form('[]'), # Default to an empty JSON array string
-    chat_id: Optional[str] = Form(None)
+    chat_id: Optional[str] = Form(None),
+    db: Client = Depends(get_db_connection)
 ):
     """
     Refactored audio-to-audio pipeline with proper history management and tool-calling.
@@ -73,7 +76,11 @@ async def full_conversation(
 
         # Reconstruct history from the rich JSON format
         for message in json.loads(history):
+            # CRITICAL FIX: Map 'assistant' role to 'model' for the API
             role = message.get("role")
+            if role == "assistant":
+                role = "model"
+
             parts = []
             for part_data in message.get("parts", []):
                 if 'text' in part_data:
@@ -91,18 +98,20 @@ async def full_conversation(
         conversation_history.append(
             genai_types.Content(role="user", parts=[genai_types.Part.from_text(user_transcript)])
         )
+        # Insert user message to Supabase
+        if chat_id:
+            insert_message(chat_id, "user", user_transcript, db)
 
         # 3. Generate AI response and get the updated history
         # Log the exact history being sent to the model for debugging
         logger.debug(f"Full conversation history sent to model: {conversation_history}")
         ai_response_text, updated_history = process_content_with_tools(conversation_history)
         logger.info(f"AI response: '{ai_response_text}'")
+        # Insert AI message to Supabase
+        if chat_id and ai_response_text:
+            insert_message(chat_id, "model", ai_response_text, db)
 
-        # 4. Save the complete, updated history to the file
-        if chat_id:
-            save_history(chat_id, updated_history)
-
-        # 5. Generate TTS for the final AI response (non-critical)
+        # 4. Generate TTS for the final AI response (non-critical)
         audio_base64 = "" # Default to empty string
         try:
             if ai_response_text: # Only generate TTS if there is text

@@ -1,111 +1,170 @@
-import os
+
 import json
-import uuid
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
-from typing import List, Dict, Any
-from google.genai import types
+from typing import List, Dict, Any, Optional
+from supabase import Client
+from postgrest import APIError
+from database import get_db_connection
+from google.genai import types as genai_types
+import logging
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
-CHAT_SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "..", "chat_sessions")
-if not os.path.exists(CHAT_SESSIONS_DIR):
-    os.makedirs(CHAT_SESSIONS_DIR)
+def insert_message(session_id: str, role: str, content: str, db: Client):
+    """
+    Insert a single chat message to Supabase for a given session.
+    """
+    if not session_id:
+        logger.warning("No session_id provided. Message will not be saved.")
+        return
+    try:
+        logger.info(f"Insert params: session_id={session_id}, role={role}, content={content}")
+        response = db.table('chat_messages').insert({
+            "session_id": session_id,
+            "role": role,
+            "content": content
+        }).execute()
+        logger.info(f"Supabase insert response: {response}")
+        if hasattr(response, 'error') and response.error:
+            logger.error(f"Supabase error: {response.error}")
+        if hasattr(response, 'data') and response.data:
+            logger.info(f"Inserted data: {response.data}")
+        else:
+            logger.warning(f"No data returned from Supabase insert for session {session_id}")
+    except Exception as e:
+        logger.error(f"Error inserting message for session {session_id}: {e}", exc_info=True)
 
-class Chat(BaseModel):
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+class ChatSession(BaseModel):
     id: str
-    history: List[Dict[str, Any]] # Allow for more complex history objects
+    title: str
+    created_at: str
+    updated_at: str
 
-class ChatCreationResponse(BaseModel):
-    chat_id: str
+class ChatMessage(BaseModel):
+    id: str
+    session_id: str
+    role: str
+    content: str
+    created_at: str
 
-def convert_history_to_json(history: List[types.Content]) -> List[Dict[str, Any]]:
+class ChatHistory(BaseModel):
+    session: ChatSession
+    messages: List[ChatMessage]
+
+@router.post("/api/chats", response_model=ChatSession, status_code=201)
+async def create_chat_session(
+    authorization: Optional[str] = Header(None),
+    db: Client = Depends(get_db_connection)
+):
     """
-    Converts a Google GenAI conversation history (list of types.Content)
-    into a JSON-serializable list of dictionaries.
+    Creates a new chat session, associating it with the authenticated user.
     """
-    json_history = []
-    for content in history:
-        # Skip the initial system instructions, which are not part of the saved history
-        if content.role == "user" and "You are a helpful AI assistant" in content.parts[0].text:
-            continue
-        if content.role == "model" and "Okay, I understand" in content.parts[0].text:
-            continue
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-        part_json_list = []
-        for part in content.parts:
-            part_json = {}
-            if hasattr(part, 'text') and part.text:
-                part_json['text'] = part.text
-            elif hasattr(part, 'function_call'):
-                part_json['function_call'] = {
-                    'name': part.function_call.name,
-                    'args': dict(part.function_call.args)
-                }
-            elif hasattr(part, 'function_response'):
-                 part_json['function_response'] = {
-                    'name': part.function_response.name,
-                    'response': part.function_response.response
-                }
-            if part_json:
-                part_json_list.append(part_json)
+    jwt_token = authorization.split("Bearer ")[1]
 
-        if part_json_list:
-            json_history.append({
-                "role": content.role, # Preserve the actual role (user, model, or tool)
-                "parts": part_json_list
-            })
-    return json_history
+    try:
+        # Get user from token
+        user_response = db.auth.get_user(jwt_token)
+        user = user_response.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid token or user not found")
 
-def save_history(chat_id: str, history: List[types.Content]):
-    """
-    Saves the entire conversation history to a chat session's JSON file.
-    This overwrites the previous history to ensure consistency.
-    """
-    file_path = os.path.join(CHAT_SESSIONS_DIR, f"{chat_id}.json")
-    serializable_history = convert_history_to_json(history)
-
-    with open(file_path, "w") as f:
-        json.dump({"history": serializable_history}, f, indent=2)
-
-@router.post("/api/chats", response_model=ChatCreationResponse)
-async def create_chat_session():
-    """
-    Creates a new chat session and returns its unique ID.
-    """
-    chat_id = str(uuid.uuid4())
-    file_path = os.path.join(CHAT_SESSIONS_DIR, f"{chat_id}.json")
-    with open(file_path, "w") as f:
-        json.dump({"history": []}, f)
-    return ChatCreationResponse(chat_id=chat_id)
+        # A default title is created, the user can change it later
+        response = db.table('chat_sessions').insert({
+            "title": "New Chat",
+            "user_id": user.id
+        }).execute()
+        
+        new_session = response.data[0]
+        return new_session
+    except APIError as e:
+        logger.error(f"Supabase API Error in create_chat_session: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=e.message)
+    except Exception as e:
+        logger.error(f"Generic error in create_chat_session: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/chats", response_model=List[str])
-async def get_all_chat_sessions():
+async def get_all_chat_sessions(db: Client = Depends(get_db_connection)):
     """
     Returns a list of all chat session IDs.
     """
-    files = os.listdir(CHAT_SESSIONS_DIR)
-    return [f.replace(".json", "") for f in files if f.endswith(".json")]
+    try:
+        response = db.table('chat_sessions').select("id").order("created_at", desc=True).execute()
+        data = response.data
+        return [session['id'] for session in data]
+    except APIError as e:
+        logger.error(f"Supabase API Error in get_all_chat_sessions: {e}", exc_info=True)
+        raise HTTPException(status_code=e.code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Generic error in get_all_chat_sessions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
-@router.get("/api/chats/{chat_id}", response_model=Chat)
-async def get_chat_session(chat_id: str):
+@router.get("/api/chats/{session_id}", response_model=ChatHistory)
+async def get_chat_history(session_id: str, db: Client = Depends(get_db_connection)):
     """
-    Retrieves the history of a specific chat session.
+    Retrieves a specific chat session and all its messages.
     """
-    file_path = os.path.join(CHAT_SESSIONS_DIR, f"{chat_id}.json")
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Chat session not found")
-    with open(file_path, "r") as f:
-        data = json.load(f)
-    return Chat(id=chat_id, history=data.get("history", []))
+    try:
+        # Get session details
+        session_res = db.table('chat_sessions').select("*").eq('id', session_id).single().execute()
+        session_data = session_res.data
 
-@router.delete("/api/chats/{chat_id}", status_code=204)
-async def delete_chat_session(chat_id: str):
+        # Get all messages for the session
+        messages_res = db.table('chat_messages').select("*").eq('session_id', session_id).order("created_at", desc=False).execute()
+        messages_data = messages_res.data
+
+        return ChatHistory(session=session_data, messages=messages_data)
+    except APIError as e:
+        if "PGRST116" in e.message: # "PGRST116" is the code for "Not Found"
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        raise HTTPException(status_code=500, detail=e.message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/api/chats/{session_id}", status_code=204)
+async def delete_chat_session(session_id: str, db: Client = Depends(get_db_connection)):
     """
-    Deletes a specific chat session.
+    Deletes a specific chat session and all its messages (due to ON DELETE CASCADE).
     """
-    file_path = os.path.join(CHAT_SESSIONS_DIR, f"{chat_id}.json")
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Chat session not found")
-    os.remove(file_path)
-    return {}
+    try:
+        response = db.table('chat_sessions').delete().eq('id', session_id).execute()
+        
+        # Check if any row was actually deleted
+        if not response.data:
+             raise HTTPException(status_code=404, detail="Chat session not found or already deleted")
+
+    except APIError as e:
+        raise HTTPException(status_code=500, detail=e.message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# This function is no longer directly exposed via an endpoint,
+# but would be used internally when a new message is generated.
+# It needs to be called from the part of your app that handles new messages.
+def add_message_to_history(session_id: str, role: str, content: str, db: Client):
+    """
+    Adds a new message to a chat session's history.
+    """
+    try:
+        response = db.table('chat_messages').insert({
+            "session_id": session_id,
+            "role": role,
+            "content": content
+        }).execute()
+        return response.data[0]
+    except APIError as e:
+        print(f"Error adding message to history: {e.message}")
+        return None
+    except Exception as e:
+        print(f"An exception occurred: {e}")
+        return None
+
+

@@ -1,6 +1,11 @@
+
 'use client'
+// Debug: log SUPABASE_URL untuk memastikan koneksi ke Supabase
+console.log('SUPABASE_URL:', process.env.NEXT_PUBLIC_SUPABASE_URL);
 
 import { useState, useRef, useEffect } from 'react';
+import { supabase } from '../utils/supabaseClient';
+import { useRouter } from 'next/navigation';
 
 // Utility to convert base64 to ArrayBuffer
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
@@ -18,6 +23,36 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
 }
 
 export default function Home() {
+  const router = useRouter();
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    const checkSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        router.replace('/login');
+      } else {
+        setUserEmail(session.user.email ?? null);
+      }
+    };
+    checkSession();
+  }, [router]);
+  const deleteChatSession = async (chatId: string) => {
+    try {
+      await fetch(`http://localhost:8000/api/chats/${chatId}`, { method: 'DELETE' });
+      fetchChatSessions(); // Refresh daftar chat
+      setActiveChatId(null);
+      setChatHistory([]);
+    } catch (error) {
+      console.error("Failed to delete chat session:", error);
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/login');
+  };
+
   const [isRecording, setIsRecording] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -33,9 +68,25 @@ export default function Home() {
 
   const handleNewChat = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/chats', { method: 'POST' });
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        router.push('/login');
+        return;
+      }
+
+      const response = await fetch('http://localhost:8000/api/chats', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to create new chat');
+      }
+
       const data = await response.json();
-      setActiveChatId(data.chat_id);
+      setActiveChatId(data.id);
       setChatHistory([]);
       setAudioUrl(null);
       setInputText('');
@@ -49,7 +100,14 @@ export default function Home() {
 
   const fetchChatSessions = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/chats');
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+
+      const response = await fetch('http://localhost:8000/api/chats', {
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+      });
       const data = await response.json();
       setChatSessions(data);
     } catch (error) {
@@ -59,31 +117,31 @@ export default function Home() {
 
   const loadChatSession = async (chatId: string) => {
     try {
-      const response = await fetch(`http://localhost:8000/api/chats/${chatId}`);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+
+      const response = await fetch(`http://localhost:8000/api/chats/${chatId}`, {
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+      });
       const data = await response.json();
-      setActiveChatId(data.id);
-      // The history from the backend is now in the rich 'parts' format.
-      // We also need to clear any local audio/image URLs.
-      const formattedHistory = data.history.map((msg: any) => ({
-        ...msg,
-        imageUrl: undefined,
-        audioUrl: undefined,
-      }));
+      setActiveChatId(data.session?.id ?? data.id);
+
+      let formattedHistory = [];
+      if (Array.isArray(data.messages) && data.messages.length > 0) {
+        // Transform the flat message list into the structured format the UI expects
+        formattedHistory = data.messages.map((msg: { role: string; content: string }) => ({
+          role: msg.role,
+          parts: [{ text: msg.content }], // Convert plain text content into the 'parts' array
+          imageUrl: undefined,
+          audioUrl: undefined,
+        }));
+      }
       setChatHistory(formattedHistory);
     } catch (error) {
+      setChatHistory([]); // Clear history on error
       console.error("Failed to load chat session:", error);
-    }
-  };
-
-  const deleteChatSession = async (chatId: string) => {
-    try {
-      await fetch(`http://localhost:8000/api/chats/${chatId}`, { method: 'DELETE' });
-      fetchChatSessions(); // Refresh the list
-      if (activeChatId === chatId) {
-        handleNewChat(); // Start a new chat if the active one was deleted
-      }
-    } catch (error) {
-      console.error("Failed to delete chat session:", error);
     }
   };
 
@@ -128,8 +186,12 @@ export default function Home() {
             
             // Add user and AI messages to chat history
             const userMessage = { role: 'user', parts: [{ text: data.user_transcript }] };
-            const aiMessage = { role: 'model', parts: [{ text: data.ai_response }] };
-            setChatHistory(prev => [...prev, userMessage, aiMessage]);
+            if (data.ai_response && data.ai_response.trim() !== '') {
+              const aiMessage = { role: 'model', parts: [{ text: data.ai_response }] };
+              setChatHistory(prev => [...prev, userMessage, aiMessage]);
+            } else {
+              setChatHistory(prev => [...prev, userMessage]);
+            }
 
             // If we received audio, create a URL and play it.
             if (data.audio_base64) {
@@ -220,8 +282,10 @@ export default function Home() {
         const data = await response.json();
         
         // Add AI response to chat history
-        const aiMessage = { role: 'model', parts: [{ text: data.text }] };
-        setChatHistory(prev => [...prev, aiMessage]);
+        if (data.text && data.text.trim() !== '') {
+          const aiMessage = { role: 'model', parts: [{ text: data.text }] };
+          setChatHistory(prev => [...prev, aiMessage]);
+        }
         
         // If we received audio, create a URL and play it.
         if (data.audio_base64) {
@@ -248,23 +312,41 @@ export default function Home() {
 
     try {
       setIsLoading(true);
-      
+
+      // Jika belum ada session, buat session baru dulu
+      let chatId = activeChatId;
+      if (!chatId) {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) {
+          router.push('/login');
+          return;
+        }
+        const res = await fetch('http://localhost:8000/api/chats', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`,
+          },
+        });
+        const data = await res.json();
+        chatId = data.id || data.chat_id; // Sesuaikan dengan response backend
+        setActiveChatId(chatId);
+      }
+
       // Add user message to chat history
       const userMessage = { role: 'user', parts: [{ text: inputText }] };
       // The history sent to the API should not contain local URLs
       const historyForAPI = chatHistory.map(({imageUrl, audioUrl, ...rest}) => rest);
-      
+
       setChatHistory(prev => [...prev, userMessage]);
       setInputText('');
-      
+
       const response = await fetch('http://localhost:8000/api/generateText', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: inputText,
-          // Send the history *before* adding the new user message, backend will add it
           history: historyForAPI,
-          chat_id: activeChatId
+          chat_id: chatId
         }),
       });
 
@@ -272,8 +354,10 @@ export default function Home() {
         const data = await response.json();
         
         // Add AI response to chat history
-        const aiMessage = { role: 'model', parts: [{ text: data.text }] };
-        setChatHistory(prev => [...prev, aiMessage]);
+        if (data.text && data.text.trim() !== '') {
+          const aiMessage = { role: 'model', parts: [{ text: data.text }] };
+          setChatHistory(prev => [...prev, aiMessage]);
+        }
 
         // If we received audio, create a URL and play it.
         if (data.audio_base64) {
@@ -321,6 +405,19 @@ export default function Home() {
               </button>
             </div>
           ))}
+        </div>
+        <div className="mt-auto pt-4 border-t border-gray-200">
+          {userEmail && (
+            <div className="text-sm text-gray-600 mb-2 truncate" title={userEmail}>
+              Logged in as: <strong>{userEmail}</strong>
+            </div>
+          )}
+          <button
+            onClick={handleLogout}
+            className="w-full px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+          >
+            Logout
+          </button>
         </div>
       </div>
 
@@ -447,11 +544,11 @@ export default function Home() {
           
           {/* Chat History */}
           <div className="mb-4 max-h-60 overflow-y-auto">
-            {chatHistory.map((message, index) => {
+            {(chatHistory ?? []).map((message, index) => {
               // Find the first text part to display.
-              const textPart = message.parts.find(p => p.text)?.text;
+              const textPart = (message.parts ?? []).find(p => p.text)?.text;
               // Check if the model is making a function call.
-              const hasFunctionCall = message.parts.some(p => p.function_call);
+              const hasFunctionCall = (message.parts ?? []).some(p => p.function_call);
 
               // If there's no text, but it's a model's turn and it's making a function call,
               // show a "thinking" message. Otherwise, render nothing for empty messages.

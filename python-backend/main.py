@@ -14,7 +14,7 @@ app = FastAPI(title="Gemini Conversational AI Python Backend", version="1.0.0")
 # Add CORS middleware to allow requests from the Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js default port
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:8000"],  # Allow Next.js and FastAPI Docs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
