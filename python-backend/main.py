@@ -7,6 +7,7 @@ from api.chat_history import router as chat_history_router
 import os
 
 # Import config to ensure environment variables are loaded
+from api import text_to_speech
 import config
 
 app = FastAPI(title="Gemini Conversational AI Python Backend", version="1.0.0")
@@ -25,6 +26,7 @@ app.include_router(generate_text_router)
 app.include_router(process_image_router) # Corrected router name
 app.include_router(full_conversation_router)
 app.include_router(chat_history_router)
+app.include_router(text_to_speech.router)
 
 @app.get("/")
 async def root():

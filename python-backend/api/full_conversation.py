@@ -38,6 +38,7 @@ async def full_conversation(
     audio: UploadFile = File(...),
     history: str = Form('[]'), # Default to an empty JSON array string
     chat_id: Optional[str] = Form(None),
+    enable_tts: bool = Form(True), # Default to True for audio inputs
     db: Client = Depends(get_db_connection)
 ):
     """
@@ -113,36 +114,37 @@ async def full_conversation(
 
         # 4. Generate TTS for the final AI response (non-critical)
         audio_base64 = "" # Default to empty string
-        try:
-            if ai_response_text: # Only generate TTS if there is text
-                tts_config = types.GenerateContentConfig(
-                    response_modalities=["audio"],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+        if enable_tts:
+            try:
+                if ai_response_text: # Only generate TTS if there is text
+                    tts_config = types.GenerateContentConfig(
+                        response_modalities=["audio"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Zephyr")
+                            )
                         )
                     )
-                )
-                
-                tts_result = genai_client.models.generate_content(
-                    model="gemini-2.5-flash-preview-tts",
-                    contents=ai_response_text,
-                    config=tts_config
-                )
-                
-                if tts_result.candidates and tts_result.candidates[0].content.parts and tts_result.candidates[0].content.parts[0].inline_data:
-                    pcm_data = tts_result.candidates[0].content.parts[0].inline_data.data
-                    wav_buffer = io.BytesIO()
-                    with wave.open(wav_buffer, 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(24000)
-                        wf.writeframes(pcm_data)
-                    audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
-                else:
-                    logger.warning("TTS generation succeeded but returned no audio data.")
-        except Exception as tts_error:
-            logger.error(f"TTS generation failed, but proceeding without audio. Error: {tts_error}")
+                    
+                    tts_result = genai_client.models.generate_content(
+                        model="gemini-2.5-flash-preview-tts",
+                        contents=ai_response_text,
+                        config=tts_config
+                    )
+                    
+                    if tts_result.candidates and tts_result.candidates[0].content.parts and tts_result.candidates[0].content.parts[0].inline_data:
+                        pcm_data = tts_result.candidates[0].content.parts[0].inline_data.data
+                        wav_buffer = io.BytesIO()
+                        with wave.open(wav_buffer, 'wb') as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(24000)
+                            wf.writeframes(pcm_data)
+                        audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
+                    else:
+                        logger.warning("TTS generation succeeded but returned no audio data.")
+            except Exception as tts_error:
+                logger.error(f"TTS generation failed, but proceeding without audio. Error: {tts_error}")
 
         # 6. Return the structured response
         return JSONResponse(content={

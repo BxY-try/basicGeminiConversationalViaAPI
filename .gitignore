@@ -53,3 +53,8 @@ __pycache__
 contohBerhasilDariColab.md
 plan.md
 geminiToolCalling.md
+# Image files
+*.png
+
+# Persona files
+python-backend/personas/

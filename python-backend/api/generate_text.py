@@ -13,7 +13,7 @@ from typing import List, Dict, Optional, Any
 from database import get_db_connection
 from supabase import Client
 from fastapi import Depends
-from utils.model_utils import process_content_with_tools, client as genai_client
+from utils.model_utils import process_content_with_tools, load_system_prompt, client as genai_client
 from google.genai import types as genai_types # Import types for history reconstruction
 from api.chat_history import insert_message
 
@@ -24,6 +24,7 @@ class TextRequest(BaseModel):
     text: str
     history: List[Dict[str, Any]] # History is now more complex
     chat_id: Optional[str] = None
+    enable_tts: bool = False
 
 class TextResponse(BaseModel):
     text: str
@@ -69,7 +70,9 @@ async def generate_text(request: TextRequest, db: Client = Depends(get_db_connec
 
         # 3. Generate the response and get the updated history
         logger.debug(f"Text chat history sent to model: {conversation_history}")
-        text_response, updated_history = process_content_with_tools(conversation_history)
+        # 3. Load persona and generate the response
+        aria_prompt = load_system_prompt("aria")
+        text_response, updated_history = process_content_with_tools(conversation_history, system_prompt=aria_prompt)
         logger.info(f"AI Response for Text: '{text_response}'")
         # Insert AI message to Supabase
         if request.chat_id and text_response:
@@ -77,36 +80,37 @@ async def generate_text(request: TextRequest, db: Client = Depends(get_db_connec
 
         # 4. Generate TTS audio for the final response (non-critical)
         audio_base64 = ""
-        try:
-            if text_response:
-                tts_config = types.GenerateContentConfig(
-                    response_modalities=["audio"],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Leda")
+        if request.enable_tts:
+            try:
+                if text_response:
+                    tts_config = types.GenerateContentConfig(
+                        response_modalities=["audio"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Leda")
+                            )
                         )
                     )
-                )
-                
-                tts_result = genai_client.models.generate_content(
-                    model="gemini-2.5-flash-preview-tts",
-                    contents=text_response,
-                    config=tts_config
-                )
-                
-                if tts_result.candidates and tts_result.candidates[0].content.parts and tts_result.candidates[0].content.parts[0].inline_data:
-                    pcm_data = tts_result.candidates[0].content.parts[0].inline_data.data
-                    wav_buffer = io.BytesIO()
-                    with wave.open(wav_buffer, 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(24000)
-                        wf.writeframes(pcm_data)
-                    audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
-                else:
-                    logger.warning("TTS generation succeeded but returned no audio data.")
-        except Exception as tts_error:
-            logger.error(f"TTS generation failed, but proceeding without audio. Error: {tts_error}")
+                    
+                    tts_result = genai_client.models.generate_content(
+                        model="gemini-2.5-flash-preview-tts",
+                        contents=text_response,
+                        config=tts_config
+                    )
+                    
+                    if tts_result.candidates and tts_result.candidates[0].content.parts and tts_result.candidates[0].content.parts[0].inline_data:
+                        pcm_data = tts_result.candidates[0].content.parts[0].inline_data.data
+                        wav_buffer = io.BytesIO()
+                        with wave.open(wav_buffer, 'wb') as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(24000)
+                            wf.writeframes(pcm_data)
+                        audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
+                    else:
+                        logger.warning("TTS generation succeeded but returned no audio data.")
+            except Exception as tts_error:
+                logger.error(f"TTS generation failed, but proceeding without audio. Error: {tts_error}")
         
         return TextResponse(text=text_response, audio_base64=audio_base64)
         
