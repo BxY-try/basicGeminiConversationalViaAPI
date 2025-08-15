@@ -4,6 +4,7 @@ from api.generate_text import router as generate_text_router
 from api.process_audio import router as process_image_router # Corrected router name
 from api.full_conversation import router as full_conversation_router
 from api.chat_history import router as chat_history_router
+from api.conversation_ws import router as conversation_ws_router
 import os
 
 # Import config to ensure environment variables are loaded
@@ -27,6 +28,7 @@ app.include_router(process_image_router) # Corrected router name
 app.include_router(full_conversation_router)
 app.include_router(chat_history_router)
 app.include_router(text_to_speech.router)
+app.include_router(conversation_ws_router)
 
 @app.get("/")
 async def root():

@@ -46,15 +46,18 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-dokumentasi.md
 .venv
 venv
 __pycache__
 contohBerhasilDariColab.md
-plan.md
 geminiToolCalling.md
+howtouseGemma.md
+geminiCLIcmnd.txt
+dokumentasi.md
+TTS_README.md
+STT_README.md
+plan.md
 # Image files
 *.png
-
 # Persona files
 python-backend/personas/

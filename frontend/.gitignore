@@ -48,3 +48,8 @@ next-env.d.ts
 
 dokumentasi.md
 geminiToolCalling.md
+# Image files
+*.png
+
+# Persona files
+python-backend/personas/

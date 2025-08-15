@@ -3,7 +3,16 @@ import json
 from google import genai
 from google.genai import types
 from tools.available_tools import available_tools, get_weather, get_news, get_current_date_and_time
-from typing import Tuple
+from typing import Tuple, Optional
+
+# --- Persona Loading ---
+def load_system_prompt(persona_name: str = "aria") -> Optional[str]:
+    """Loads the system prompt from a text file."""
+    persona_path = os.path.join(os.path.dirname(__file__), '..', 'personas', f'{persona_name}.txt')
+    if os.path.exists(persona_path):
+        with open(persona_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    return None
 
 # Initialize the Generative AI client
 client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -53,7 +62,7 @@ tool_config = types.ToolConfig(
     )
 )
 
-def process_content_with_tools(contents: list) -> Tuple[str, list]:
+def process_content_with_tools(contents: list, system_prompt: Optional[str] = None) -> Tuple[str, list]:
     """
     Processes a list of content parts using the Gemini model, with a tool-calling loop.
 
@@ -74,14 +83,18 @@ def process_content_with_tools(contents: list) -> Tuple[str, list]:
     # Create a mutable copy of the history to avoid modifying the original list
     history = list(contents)
 
+    # Define the generation config, including the system prompt
+    generation_config = genai.types.GenerateContentConfig(
+        tools=[gemini_tools],
+        tool_config=tool_config,
+        system_instruction=system_prompt
+    )
+
     # First call to the model
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=history,
-        config=genai.types.GenerateContentConfig(
-            tools=[gemini_tools],
-            tool_config=tool_config,
-        ),
+        config=generation_config,
     )
 
     model_response_content = response.candidates[0].content
@@ -133,10 +146,7 @@ def process_content_with_tools(contents: list) -> Tuple[str, list]:
         final_response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=history,
-            config=genai.types.GenerateContentConfig(
-                tools=[gemini_tools],
-                tool_config=tool_config,
-            ),
+            config=generation_config,
         )
         history.append(final_response.candidates[0].content)
         final_text = "".join(part.text for part in final_response.candidates[0].content.parts if part.text)

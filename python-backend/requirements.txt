@@ -7,3 +7,9 @@ uvicorn[standard]
 requests==2.31.0
 supabase
 psycopg2-binary==2.9.9
+websockets
+faster-whisper
+transformers
+torch
+scipy
+soundfile

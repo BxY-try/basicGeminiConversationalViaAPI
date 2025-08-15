@@ -91,18 +91,35 @@ async def create_chat_session(
         logger.error(f"Generic error in create_chat_session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/api/chats", response_model=List[str])
-async def get_all_chat_sessions(db: Client = Depends(get_db_connection)):
+class ChatSessionInfo(BaseModel):
+    id: str
+    created_at: str
+    title: str
+
+@router.get("/api/chats", response_model=List[ChatSessionInfo])
+async def get_all_chat_sessions(
+    authorization: Optional[str] = Header(None),
+    db: Client = Depends(get_db_connection)
+):
     """
-    Returns a list of all chat session IDs.
+    Returns a list of all chat sessions for the authenticated user.
     """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    jwt_token = authorization.split("Bearer ")[1]
+    
     try:
-        response = db.table('chat_sessions').select("id").order("created_at", desc=True).execute()
-        data = response.data
-        return [session['id'] for session in data]
+        user_response = db.auth.get_user(jwt_token)
+        user = user_response.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid token or user not found")
+
+        response = db.table('chat_sessions').select("id, created_at, title").eq("user_id", user.id).order("created_at", desc=True).execute()
+        return response.data
     except APIError as e:
         logger.error(f"Supabase API Error in get_all_chat_sessions: {e}", exc_info=True)
-        raise HTTPException(status_code=e.code, detail=e.message)
+        raise HTTPException(status_code=500, detail=e.message)
     except Exception as e:
         logger.error(f"Generic error in get_all_chat_sessions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
@@ -145,6 +162,43 @@ async def delete_chat_session(session_id: str, db: Client = Depends(get_db_conne
         raise HTTPException(status_code=500, detail=e.message)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+class UpdateChatSession(BaseModel):
+   title: str
+
+@router.put("/api/chats/{session_id}", response_model=ChatSession)
+async def update_chat_session(
+   session_id: str,
+   session_data: UpdateChatSession,
+   authorization: Optional[str] = Header(None),
+   db: Client = Depends(get_db_connection)
+):
+   """
+   Updates the title of a specific chat session.
+   """
+   if not authorization or not authorization.startswith("Bearer "):
+       raise HTTPException(status_code=401, detail="Unauthorized")
+
+   jwt_token = authorization.split("Bearer ")[1]
+   
+   try:
+       user_response = db.auth.get_user(jwt_token)
+       user = user_response.user
+       if not user:
+           raise HTTPException(status_code=401, detail="Invalid token or user not found")
+
+       response = db.table('chat_sessions').update({
+           "title": session_data.title
+       }).eq('id', session_id).eq('user_id', user.id).execute()
+       
+       if not response.data:
+           raise HTTPException(status_code=404, detail="Chat session not found or you don't have permission to edit it.")
+           
+       return response.data[0]
+   except APIError as e:
+       raise HTTPException(status_code=500, detail=e.message)
+   except Exception as e:
+       raise HTTPException(status_code=500, detail=str(e))
 
 # This function is no longer directly exposed via an endpoint,
 # but would be used internally when a new message is generated.
