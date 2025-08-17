@@ -140,8 +140,10 @@ export default function LandingPage() {
        const reader = new FileReader();
        reader.onload = (event) => {
            sessionStorage.setItem('initialImage', event.target?.result as string);
-           sessionStorage.setItem('initialPrompt', textToSubmit);
-           router.push(`/chat?initial=image`);
+           sessionStorage.setItem('initialPrompt', textToSubmit); // Keep this for potential fallback
+           const imageUrl = event.target?.result as string;
+           // Pass both prompt and image URL in the query
+           router.push(`/chat?initial=image&prompt=${encodeURIComponent(textToSubmit)}&imageUrl=${encodeURIComponent(imageUrl)}`);
        };
        reader.readAsDataURL(image);
     } else {

@@ -7,37 +7,56 @@ interface CallOverlayProps {
 }
 
 // Hook to manage the audio queue.
-const useAudioQueue = () => {
-  const [audioQueue, setAudioQueue] = useState<string[]>([]);
+const useAudioQueue = (onAudioStart: (transcript: string) => void, onAudioEnd: () => void) => {
+  const [audioQueue, setAudioQueue] = useState<{ audio: string; transcript: string }[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  // Effect to initialize and clean up the audio element
   useEffect(() => {
-    if (!audioRef.current) {
-      audioRef.current = new Audio();
-      audioRef.current.onended = () => {
+    audioRef.current = new Audio();
+    const currentAudioRef = audioRef.current;
+
+    const handleAudioEnd = () => {
+      setTimeout(() => {
         setIsPlaying(false);
+        onAudioEnd();
         setAudioQueue(prev => prev.slice(1));
-      };
-    }
+      }, 100);
+    };
+
+    currentAudioRef.addEventListener('ended', handleAudioEnd);
+
+    return () => {
+      currentAudioRef.removeEventListener('ended', handleAudioEnd);
+      currentAudioRef.pause();
+      currentAudioRef.src = '';
+    };
   }, []);
 
+  // Effect to play audio when the queue has items and we are not already playing
   useEffect(() => {
     if (audioQueue.length > 0 && !isPlaying) {
       setIsPlaying(true);
-      const nextAudioSrc = `data:audio/wav;base64,${audioQueue[0]}`;
+      const { audio, transcript } = audioQueue[0];
+      onAudioStart(transcript);
+      const nextAudioSrc = `data:audio/wav;base64,${audio}`;
       if (audioRef.current) {
         audioRef.current.src = nextAudioSrc;
         audioRef.current.play().catch(e => {
           console.error("Audio play failed:", e);
           setIsPlaying(false);
+          onAudioEnd();
+          setAudioQueue(prev => prev.slice(1));
         });
       }
+    } else if (audioQueue.length === 0 && !isPlaying) {
+      onAudioEnd();
     }
-  }, [audioQueue, isPlaying]);
+  }, [audioQueue, isPlaying, onAudioStart, onAudioEnd]);
 
-  const addAudioToQueue = useCallback((audioBase64: string) => {
-    setAudioQueue(prev => [...prev, audioBase64]);
+  const addAudioToQueue = useCallback((audioBase64: string, transcript: string) => {
+    setAudioQueue(prev => [...prev, { audio: audioBase64, transcript }]);
   }, []);
 
   const isIdle = audioQueue.length === 0 && !isPlaying;
@@ -50,11 +69,21 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
   const [status, setStatus] = useState('connecting');
   const [isMuted, setIsMuted] = useState(false);
   const [userTranscript, setUserTranscript] = useState('');
+  const [currentAiTranscript, setCurrentAiTranscript] = useState('');
+  const [displayedTranscript, setDisplayedTranscript] = useState('');
   const [aiTurnEnded, setAiTurnEnded] = useState(true);
-  // New state to act as a watchdog for the recognition service
+  const [recognitionLang, setRecognitionLang] = useState('id-ID'); // 'id-ID', 'ja-JP', or 'en-US'
   const [recognitionCycle, setRecognitionCycle] = useState(0);
 
-  const { addAudioToQueue, isPlaying: isAiSpeaking, isIdle: isAudioIdle } = useAudioQueue();
+  const onAudioStart = useCallback((transcript: string) => {
+    setCurrentAiTranscript(transcript);
+  }, []);
+
+  const onAudioEnd = useCallback(() => {
+    // The transcript is now cleared when the AI's turn ends, not after each chunk.
+  }, []);
+
+  const { addAudioToQueue, isPlaying: isAiSpeaking, isIdle: isAudioIdle } = useAudioQueue(onAudioStart, onAudioEnd);
   
   const recognitionRef = useRef<any>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -86,11 +115,12 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
       setAiTurnEnded(false);
       socketRef.current.send(JSON.stringify({
         type: 'user_transcript',
-        text: transcript
+        text: transcript,
+        lang: recognitionLang.split('-')[0]
       }));
       setUserTranscript('');
     }
-  }, [setAiTurnEnded, setUserTranscript]);
+  }, [setAiTurnEnded, setUserTranscript, recognitionLang]);
 
   // Main State Machine Effect
   useEffect(() => {
@@ -111,7 +141,7 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
       stopRecognition();
     }
     // This effect is now also triggered by recognitionCycle, ensuring a restart if needed.
-  }, [status, isMuted, recognitionCycle, startRecognition, stopRecognition]);
+  }, [status, isMuted, recognitionCycle, startRecognition, stopRecognition, recognitionLang]);
 
   // WebSocket and SpeechRecognition Setup Effect
   useEffect(() => {
@@ -122,10 +152,12 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'ai_audio_chunk' && data.audio_base64) {
-          addAudioToQueue(data.audio_base64);
+        if (data.type === 'ai_audio_chunk' && data.audio_base64 && data.transcript) {
+          addAudioToQueue(data.audio_base64, data.transcript);
         } else if (data.type === 'ai_turn_end') {
           setAiTurnEnded(true);
+          setCurrentAiTranscript('');
+          setDisplayedTranscript('');
         }
       } catch (error) {
         console.error('Error parsing socket message:', error);
@@ -142,7 +174,7 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
     recognitionRef.current = new SpeechRecognition();
     recognitionRef.current.continuous = true;
     recognitionRef.current.interimResults = true;
-    recognitionRef.current.lang = 'id-ID';
+    recognitionRef.current.lang = recognitionLang;
 
     recognitionRef.current.onresult = (event: any) => {
       let final_transcript = '';
@@ -192,13 +224,46 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
         ws.close();
       }
     };
-  }, [addAudioToQueue, sendTranscriptToServer]);
+  }, [addAudioToQueue, sendTranscriptToServer, recognitionLang]);
+
+  // Effect for the typewriter animation
+  useEffect(() => {
+    if (currentAiTranscript && isAiSpeaking) {
+      // Reset transcript immediately to prevent flashing old text
+      setDisplayedTranscript('');
+
+      // Use character-by-character for Japanese, word-by-word for others
+      if (recognitionLang === 'ja-JP') {
+        let index = 0;
+        const interval = setInterval(() => {
+          index++;
+          setDisplayedTranscript(currentAiTranscript.slice(0, index));
+          if (index >= currentAiTranscript.length) {
+            clearInterval(interval);
+          }
+        }, 50); // Speed for characters
+        return () => clearInterval(interval);
+      } else {
+        const words = currentAiTranscript.split(' ');
+        let index = 0;
+        const interval = setInterval(() => {
+          index++;
+          setDisplayedTranscript(words.slice(0, index).join(' '));
+          if (index >= words.length) {
+            clearInterval(interval);
+          }
+        }, 150); // Speed for words
+        return () => clearInterval(interval);
+      }
+    }
+  }, [currentAiTranscript, isAiSpeaking, recognitionLang]);
 
   const getStatusText = () => {
     switch (status) {
       case 'speaking':
         return "Aria sedang berbicara...";
       case 'listening':
+        // Restore user transcript visibility
         return userTranscript ? `"${userTranscript}"` : "Mendengarkan...";
       case 'initializing':
         return "Menginisialisasi...";
@@ -211,7 +276,8 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-80 flex flex-col items-center justify-center z-50 text-white">
-      <div className="text-center">
+      {/* Add a higher z-index to the text container to ensure it's on top */}
+      <div className="text-center relative z-10">
         <div className="relative w-48 h-48 mx-auto mb-8">
           <div className="absolute inset-0 rounded-full bg-white/10"></div>
 
@@ -232,12 +298,35 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
             </div>
           )}
         </div>
-        <p className="text-xl font-medium mt-4 h-14 flex items-center justify-center" style={{ color: 'white' }}>{getStatusText()}</p>
+        <p
+          className="text-xl font-medium mt-4 h-8 flex items-center justify-center"
+          style={{ color: 'white' }}
+        >
+          {getStatusText()}
+        </p>
+        <div
+          className="text-base mt-2 h-16 overflow-y-auto px-4 text-center"
+          style={{ minHeight: '4rem', color: '#CCCCCC' }}
+        >
+          {status === 'speaking' && displayedTranscript}
+        </div>
       </div>
 
-      <div className="absolute bottom-16 flex gap-6">
-        <button 
-          onClick={() => setIsMuted(!isMuted)} 
+      <div className="absolute bottom-16 flex items-center gap-6">
+        <button
+          onClick={() => setRecognitionLang(prev => {
+            if (prev === 'id-ID') return 'ja-JP';
+            if (prev === 'ja-JP') return 'en-US';
+            return 'id-ID';
+          })}
+          className="p-4 rounded-full bg-white/20 hover:bg-white/30 text-white transition-colors flex items-center justify-center w-16 h-16"
+          aria-label="Switch Language"
+        >
+          <span className="text-lg font-bold">{recognitionLang.split('-')[0].toUpperCase()}</span>
+        </button>
+
+        <button
+          onClick={() => setIsMuted(!isMuted)}
           className={`p-4 rounded-full ${isMuted ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-white/20 hover:bg-white/30'} text-white transition-colors`}
           aria-label={isMuted ? "Unmute" : "Mute"}
         >
@@ -258,6 +347,7 @@ const CallOverlay = ({ onClose }: CallOverlayProps) => {
             </svg>
           )}
         </button>
+
         <button onClick={onClose} className="p-4 rounded-full bg-red-600 text-white hover:bg-red-700 transition-colors" aria-label="End Call">
           <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>

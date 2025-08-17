@@ -105,13 +105,22 @@ function ChatPageContent() {
          router.replace('/chat', { scroll: false });
        } else if (initialAction === 'image' && !initialQueryProcessed.current) {
          initialQueryProcessed.current = true;
-         const image = sessionStorage.getItem('initialImage');
-         const prompt = sessionStorage.getItem('initialPrompt');
-         if (image && prompt) {
-           handleInitialImageQuery(prompt, image, session.access_token);
-           sessionStorage.removeItem('initialImage');
-           sessionStorage.removeItem('initialPrompt');
+         const prompt = searchParams.get('prompt');
+         const imageUrl = searchParams.get('imageUrl');
+         if (prompt && imageUrl) {
+           // Add to chat history immediately to show bubble
+           const userMessage = {
+             id: `user-${Date.now()}`,
+             role: 'user',
+             parts: [{ text: prompt }],
+             imageUrl: imageUrl
+           };
+           setChatHistory(prev => [...prev, userMessage]);
+           
+           // Now, handle the backend submission
+           handleInitialImageQuery(prompt, imageUrl, session.access_token);
          }
+         // Clean up URL
          router.replace('/chat', { scroll: false });
        }
       }
@@ -145,9 +154,7 @@ function ChatPageContent() {
      }
      const blob = new Blob([ab], { type: mimeString });
      const file = new File([blob], "initial-image.jpg", { type: mimeString });
-
-     const userMessage = { id: `user-${Date.now()}`, role: 'user', parts: [{ text: prompt }], imageUrl: imageBase64 };
-     setChatHistory(prev => [...prev, userMessage]);
+// The user message is now added in useEffect, so we can remove this duplicate call.
 
      const formData = new FormData();
      formData.append('image', file);
@@ -372,9 +379,12 @@ function ChatPageContent() {
     setImagePreview(null);
 
     if (image) {
+     // Add user message to history immediately for instant feedback
+     setChatHistory(prev => [...prev, userMessage]);
+
       const formData = new FormData();
       formData.append('image', image);
-      formData.append('prompt', inputText);
+      formData.append('prompt', textToSend); // Use textToSend
       formData.append('history', JSON.stringify(chatHistory));
       formData.append('chat_id', activeChatId);
       

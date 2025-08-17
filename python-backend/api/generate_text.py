@@ -50,7 +50,7 @@ async def generate_text(request: TextRequest, db: Client = Depends(get_db_connec
             parts = []
             for part_data in message.get("parts", []):
                 if 'text' in part_data:
-                    parts.append(genai_types.Part.from_text(part_data['text']))
+                    parts.append(genai_types.Part(text=part_data['text']))
                 elif 'function_call' in part_data:
                     fc = part_data['function_call']
                     parts.append(genai_types.Part.from_function_call(name=fc['name'], args=fc['args']))
@@ -62,7 +62,7 @@ async def generate_text(request: TextRequest, db: Client = Depends(get_db_connec
 
         # 2. Add the new user message to the history
         conversation_history.append(
-            genai_types.Content(role="user", parts=[genai_types.Part.from_text(request.text)])
+            genai_types.Content(role="user", parts=[genai_types.Part(text=request.text)])
         )
         # Insert user message to Supabase
         if request.chat_id:
@@ -92,10 +92,20 @@ async def generate_text(request: TextRequest, db: Client = Depends(get_db_connec
                         )
                     )
                     
+                    # Correctly format contents for the TTS model as per documentation
+                    tts_contents = [
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part(text=text_response),
+                            ],
+                        ),
+                    ]
+                    
                     tts_result = genai_client.models.generate_content(
                         model="gemini-2.5-flash-preview-tts",
-                        contents=text_response,
-                        config=tts_config
+                        contents=tts_contents,
+                        generation_config=tts_config
                     )
                     
                     if tts_result.candidates and tts_result.candidates[0].content.parts and tts_result.candidates[0].content.parts[0].inline_data:

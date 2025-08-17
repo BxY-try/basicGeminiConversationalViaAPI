@@ -49,15 +49,20 @@ next-env.d.ts
 .venv
 venv
 __pycache__
-contohBerhasilDariColab.md
-geminiToolCalling.md
-howtouseGemma.md
-geminiCLIcmnd.txt
-dokumentasi.md
-TTS_README.md
-STT_README.md
-plan.md
 # Image files
 *.png
 # Persona files
 python-backend/personas/
+#md files
+howtouseGemma.md
+dokumentasi.md
+TTS_README.md
+STT_README.md
+geminiToolCalling.md
+
+#else
+modelJP.json
+
+# Model and Engine Directories
+voicevox_engine/
+python-backend/datasetsANDmodels/
